@@ -59,6 +59,20 @@ export const IdeClient = () => {
     setTree(data.tree || []);
   };
 
+  // Helper: include AI key/model with AI requests
+  const getAIHeaders = () => {
+    try {
+      const apiKey = localStorage.getItem("ai.apiKey") || "";
+      const model = localStorage.getItem("ai.model") || "";
+      const headers: Record<string, string> = {};
+      if (apiKey) headers["x-ai-key"] = apiKey;
+      if (model) headers["x-ai-model"] = model;
+      return headers;
+    } catch {
+      return {} as Record<string, string>;
+    }
+  };
+
   useEffect(() => {
     fetchTree();
   }, []);
@@ -75,11 +89,11 @@ export const IdeClient = () => {
     }
   };
 
-  async function handleCreateFile(pathRel: string) {
+  async function handleCreateFile(pathRel: string, content?: string) {
     const res = await fetch("/api/ide/fs/create", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ path: pathRel }),
+      body: JSON.stringify({ path: pathRel, ...(typeof content === "string" ? { content } : {}) }),
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data?.error || "Failed to create file");
@@ -99,38 +113,85 @@ export const IdeClient = () => {
     if (activePath === pathRel) await openFile(pathRel);
   }
 
+  async function handleDeleteFile(pathRel: string) {
+    const res = await fetch("/api/ide/fs/delete", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path: pathRel }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data?.error || "Failed to delete file");
+    await fetchTree();
+    if (activePath === pathRel) {
+      setActivePath("");
+      setActiveContent("// File deleted. Select another file.\n");
+    }
+    setChat((c) => [...c, { role: "assistant", content: `Deleted file: ${pathRel}` , ts: Date.now() }]);
+  }
+
   async function handleExplainFile(pathRel: string) {
-    const res = await fetch(`/api/ide/fs/explain?path=${encodeURIComponent(pathRel)}`);
+    const res = await fetch(`/api/ide/fs/explain?path=${encodeURIComponent(pathRel)}`, {
+      headers: { ...getAIHeaders() },
+    });
     const data = await res.json();
     if (!res.ok) throw new Error(data?.error || "Failed to explain file");
     const msg = `Explanation for ${data.path}\n- Language: ${data.language}\n- Lines: ${data.lineCount}\n- Exports: ${(data.exports || []).join(", ") || "(none)"}\n- Summary: ${data.summary}`;
     setChat((c) => [...c, { role: "assistant", content: msg, ts: Date.now() }]);
   }
 
+  function normalizePath(folder: string | undefined, nameOrPath: string): string {
+    if (!folder) return nameOrPath.trim();
+    const cleanFolder = folder.replace(/^the\s+/i, "").replace(/\s+folder$/i, "").trim().replace(/\/+$/g, "");
+    return `${cleanFolder}/${nameOrPath.trim()}`.replace(/\\/g, "/");
+  }
+
   function parseAndDispatchCommand(text: string) {
     const raw = text.trim();
-    // Create: "Create a new file named components/Header.tsx"
-    const mCreate = /^(create\s+(a\s+)?new\s+file\s+named\s+|create\s+file\s+)(.+)$/i.exec(raw);
-    if (mCreate) {
-      const pathRel = mCreate[3].trim();
-      return handleCreateFile(pathRel);
+
+    // CREATE variants:
+    // 1) "Create a new file named components/Header.tsx"
+    // 2) "Create a new file in the src folder named styles.css and write some basic CSS styles in it."
+    let m = /^(?:create\s+(?:a\s+)?new\s+file|create\s+file)(?:\s+in\s+(.+?)\s+folder)?\s+named\s+([^\s]+)(?:\s+and\s+write\s+(.+))?$/i.exec(raw);
+    if (m) {
+      const folder = m[1];
+      const name = m[2];
+      const content = m[3]?.trim();
+      const pathRel = normalizePath(folder, name);
+      setChat((c) => [...c, { role: "assistant", content: `Okay, I will now create the file ${pathRel}…`, ts: Date.now() }]);
+      return handleCreateFile(pathRel, content);
     }
-    // Edit: "In App.tsx, change <find> to 'Hello World'"
-    const mEdit = /^in\s+([^,]+),\s*change\s+(.+?)\s+to\s+['"]([^'"]+)['"]/i.exec(raw);
-    if (mEdit) {
-      const pathRel = mEdit[1].trim();
-      const find = mEdit[2].trim();
-      const replace = mEdit[3];
+
+    // DELETE variant: "Delete the README.md file" or "Delete file src/app/page.tsx"
+    m = /^delete\s+(?:the\s+)?(?:file\s+)?(.+)$/i.exec(raw);
+    if (m) {
+      const pathRel = m[1].trim();
+      setChat((c) => [...c, { role: "assistant", content: `Okay, I will now delete the file ${pathRel}…`, ts: Date.now() }]);
+      return handleDeleteFile(pathRel);
+    }
+
+    // EDIT: "In App.tsx, change <find> to 'Hello World'" or "Open App.tsx and change ..."
+    m = /^(?:in|open)\s+([^,]+?),?\s*(?:and\s+)?change\s+(.+?)\s+to\s+['"]([^'"]+)['"]/i.exec(raw);
+    if (m) {
+      const pathRel = m[1].trim();
+      const find = m[2].trim();
+      const replace = m[3];
+      setChat((c) => [...c, { role: "assistant", content: `Okay, I will now edit ${pathRel} (change ${find} → "${replace}")…`, ts: Date.now() }]);
       return handleEditFile(pathRel, find, replace);
     }
-    // Explain: "Explain this code in server.js" or "Explain code in src/app/page.tsx"
-    const mExplain = /^explain\s+(this\s+)?code\s+in\s+(.+)$/i.exec(raw);
-    if (mExplain) {
-      const pathRel = mExplain[2].trim();
+
+    // EXPLAIN / ANALYZE: "Analyze the code in server.js and explain what it does" or "Explain this code in src/app/page.tsx"
+    m = /^(?:analy(se|ze)\s+the\s+code\s+in|explain\s+(?:this\s+)?code\s+in)\s+(.+?)(?:\s+and\s+explain\s+what\s+it\s+does)?$/i.exec(raw);
+    if (m) {
+      const pathRel = (m[2] || m[0]).trim();
+      setChat((c) => [...c, { role: "assistant", content: `Okay, I will now analyze ${pathRel} and explain it…`, ts: Date.now() }]);
       return handleExplainFile(pathRel);
     }
-    // Fallback: just echo
-    setChat((c) => [...c, { role: "assistant", content: "I didn't understand. Try: \n- Create a new file named components/Header.tsx\n- In App.tsx, change <text> to 'Hello World'\n- Explain this code in server.js", ts: Date.now() }]);
+
+    // Fallback: guidance
+    setChat((c) => [
+      ...c,
+      { role: "assistant", content: "I didn't understand. Try:\n- Create a new file in the src folder named styles.css and write some basic CSS styles in it.\n- Delete the README.md file\n- In src/app/page.tsx, change Home to 'Hello World'\n- Analyze the code in src/app/page.tsx and explain what it does.", ts: Date.now() },
+    ]);
   }
 
   const handleAssistantSubmit = async (e: React.FormEvent) => {
@@ -162,7 +223,7 @@ export const IdeClient = () => {
     try {
       const res = await fetch("/api/ide/plan", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...getAIHeaders() },
         body: JSON.stringify({ idea }),
       });
       const data = await res.json();
@@ -192,23 +253,9 @@ export const IdeClient = () => {
         ...c,
         { role: "assistant", content: createdMsg, ts: Date.now() },
       ]);
-
-      // Example: Add a sample file to tree reactively on first step
-      if (i === 0) {
-        setTree((prev) => {
-          const cloned = structuredClone(prev) as FileNode[];
-          // try to locate src/app
-          const src = cloned.find((n) => n.name === "src");
-          if (src && src.children) {
-            const app = src.children.find((n) => n.name === "app");
-            if (app && app.children) {
-              app.children.push({ name: "demo.ts", path: "src/app/demo.ts", type: "file" });
-            }
-          }
-          return cloned;
-        });
-      }
     }
+    // Refresh tree from server to reflect any real changes made by steps
+    await fetchTree();
     setIsExecuting(false);
   };
 
