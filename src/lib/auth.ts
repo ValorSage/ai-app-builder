@@ -13,16 +13,18 @@ export const auth = betterAuth({
 	emailAndPassword: {
 		enabled: false,
 	},
-	// enable Google OAuth 2.0
-	socialProviders: {
-		google: {
-			clientId: process.env.GOOGLE_CLIENT_ID as string,
-			clientSecret: process.env.GOOGLE_CLIENT_SECRET as string,
-			// Always show account chooser and request refresh tokens if needed
-			prompt: "select_account",
-			accessType: "offline",
+	// Temporarily disable Google provider unless valid env keys are present
+	...(process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET ? {
+		socialProviders: {
+			google: {
+				clientId: process.env.GOOGLE_CLIENT_ID as string,
+				clientSecret: process.env.GOOGLE_CLIENT_SECRET as string,
+				// Always show account chooser and request refresh tokens if needed
+				prompt: "select_account",
+				accessType: "offline",
+			},
 		},
-	},
+	} : {}),
 	plugins: [bearer()]
 });
 
