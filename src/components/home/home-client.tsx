@@ -5,18 +5,11 @@ import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Card } from "@/components/ui/card";
-import { Loader2, Sparkles, Download, Code2, User, LogOut, LayoutDashboard } from "lucide-react";
-import { authClient, useSession } from "@/lib/auth-client";
-import { toast } from "sonner";
-import Link from "next/link";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuLabel,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
+import { Loader2, Sparkles, Download, Code2 } from "lucide-react";
+// import { authClient, useSession } from "@/lib/auth-client";
+// import Link from "next/link";
+// import { toast } from "sonner";
+// import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 
 export const HomeClient = () => {
   const [projectDescription, setProjectDescription] = useState("");
@@ -24,58 +17,23 @@ export const HomeClient = () => {
   const [isComplete, setIsComplete] = useState(false);
   const [downloadUrl, setDownloadUrl] = useState<string | null>(null);
   const [currentProjectId, setCurrentProjectId] = useState<number | null>(null);
-  const { data: session, isPending, refetch } = useSession();
+  // const { data: session, isPending, refetch } = useSession();
   const router = useRouter();
 
-  const handleSignOut = async () => {
-    const { error } = await authClient.signOut();
-    if (error?.code) {
-      toast.error("Failed to sign out");
-    } else {
-      localStorage.removeItem("bearer_token");
-      refetch();
-      router.push("/");
-      toast.success("Signed out successfully");
-    }
-  };
-
-  const handleGoogleSignIn = async () => {
-    try {
-      const redirect = typeof window !== "undefined" ? new URLSearchParams(window.location.search).get("redirect") : null;
-      const { error } = await authClient.signIn.social({
-        provider: "google",
-      });
-      if (error?.code) {
-        toast.error("Google sign-in failed");
-        return;
-      }
-      if (redirect) router.push(redirect);
-    } catch (e) {
-      toast.error("Unable to start Google sign-in");
-    }
-  };
-
+  // Temporarily allow generation without login
   const handleGenerateProject = async () => {
     if (!projectDescription.trim()) return;
-
-    if (!session?.user) {
-      toast.error("Please log in to generate projects");
-      router.push(`/login?redirect=${encodeURIComponent(window.location.pathname)}`);
-      return;
-    }
 
     setIsGenerating(true);
     setIsComplete(false);
     setCurrentProjectId(null);
 
     try {
-      const token = localStorage.getItem("bearer_token");
-
       const createResponse = await fetch("/api/projects", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
+          // Authorization header removed temporarily
         },
         body: JSON.stringify({
           title: projectDescription.substring(0, 100),
@@ -102,7 +60,7 @@ export const HomeClient = () => {
           method: "PUT",
           headers: {
             "Content-Type": "application/json",
-            Authorization: `Bearer ${token}`,
+            // Authorization header removed temporarily
           },
           body: JSON.stringify({ status: "failed" }),
         });
@@ -118,7 +76,7 @@ export const HomeClient = () => {
         method: "PUT",
         headers: {
           "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
+          // Authorization header removed temporarily
         },
         body: JSON.stringify({
           status: "completed",
@@ -126,10 +84,10 @@ export const HomeClient = () => {
         }),
       });
 
-      toast.success("Project generated successfully!");
+      // toast.success("Project generated successfully!");
     } catch (error) {
       console.error("Error generating project:", error);
-      toast.error("Failed to generate project. Please try again.");
+      // toast.error("Failed to generate project. Please try again.");
     } finally {
       setIsGenerating(false);
     }
@@ -143,7 +101,7 @@ export const HomeClient = () => {
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
-      toast.success("Project downloaded!");
+      // toast.success("Project downloaded!");
     }
   };
 
@@ -161,51 +119,8 @@ export const HomeClient = () => {
             </div>
           </div>
 
-          <div className="flex items-center gap-3">
-            {isPending ? (
-              <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
-            ) : session?.user ? (
-              <>
-                <Link href="/dashboard">
-                  <Button variant="outline" size="sm">
-                    <LayoutDashboard className="h-4 w-4 mr-2" />
-                    Dashboard
-                  </Button>
-                </Link>
-                <DropdownMenu>
-                  <DropdownMenuTrigger asChild>
-                    <Button variant="ghost" size="sm" className="gap-2">
-                      <User className="h-4 w-4" />
-                      <span className="hidden sm:inline">{session.user.name}</span>
-                    </Button>
-                  </DropdownMenuTrigger>
-                  <DropdownMenuContent align="end" className="w-56">
-                    <DropdownMenuLabel>
-                      <div className="flex flex-col">
-                        <span className="text-sm font-medium">{session.user.name}</span>
-                        <span className="text-xs text-muted-foreground">{session.user.email}</span>
-                      </div>
-                    </DropdownMenuLabel>
-                    <DropdownMenuSeparator />
-                    <DropdownMenuItem onClick={handleSignOut} className="cursor-pointer">
-                      <LogOut className="h-4 w-4 mr-2" />
-                      Sign Out
-                    </DropdownMenuItem>
-                  </DropdownMenuContent>
-                </DropdownMenu>
-              </>
-            ) : (
-              <Button onClick={handleGoogleSignIn} size="sm" variant="outline" className="bg-white text-black border-input hover:bg-white/90">
-                <svg className="mr-2 h-4 w-4" viewBox="0 0 533.5 544.3" aria-hidden="true">
-                  <path fill="#4285F4" d="M533.5 278.4c0-18.5-1.7-36.3-5-53.4H272v101h146.9c-6.3 34.1-25.3 63-54 82.3v68h87.1c51-47 81.5-116.2 81.5-197.9z"/>
-                  <path fill="#34A853" d="M272 544.3c73.7 0 135.6-24.4 180.8-66.1l-87.1-68c-24.2 16.3-55.2 26-93.7 26-71.9 0-132.8-48.5-154.6-113.8H27.2v71.6C72.2 497.3 166.1 544.3 272 544.3z"/>
-                  <path fill="#FBBC05" d="M117.4 322.4c-10.6-31.9-10.6-66.4 0-98.3V152.5H27.2c-40.5 80.9-40.5 176.3 0 257.2l90.2-87.3z"/>
-                  <path fill="#EA4335" d="M272 106.1c39.9-.6 77.8 14.6 106.8 42.7l79.6-79.6C407.6 24 343.7-.1 272 0 166.1 0 72.2 47 27.2 152.5l90.2 71.6C139.2 154.6 200.1 106.1 272 106.1z"/>
-                </svg>
-                Sign in with Google
-              </Button>
-            )}
-          </div>
+          {/* Temporarily hide auth UI */}
+          <div className="flex items-center gap-3" />
         </div>
       </header>
 
