@@ -10,7 +10,8 @@ import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "@/componen
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Textarea } from "@/components/ui/textarea";
 import { Input } from "@/components/ui/input";
-import { Download, Play, Share2, Folder, File, ChevronRight, ChevronDown, Bot, Settings, ClipboardList } from "lucide-react";
+import { Download, Play, Share2, Folder, File, ChevronRight, ChevronDown, Bot, Settings, ClipboardList, Send } from "lucide-react";
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 
 // Monaco must be dynamically imported on client
 const MonacoEditor = dynamic(() => import("@monaco-editor/react"), { ssr: false });
@@ -47,13 +48,18 @@ export const IdeClient = () => {
   const [chat, setChat] = useState<{ role: "system" | "assistant" | "user"; content: string; ts: number }[]>([]);
   const [isPlanning, setIsPlanning] = useState(false);
   const [isExecuting, setIsExecuting] = useState(false);
+  const [assistantInput, setAssistantInput] = useState("");
+  const [isSending, setIsSending] = useState(false);
+  const [previewOpen, setPreviewOpen] = useState(false);
+  const [previewUrl, setPreviewUrl] = useState("http://localhost:3001");
+
+  const fetchTree = async () => {
+    const res = await fetch("/api/ide/files");
+    const data = await res.json();
+    setTree(data.tree || []);
+  };
 
   useEffect(() => {
-    const fetchTree = async () => {
-      const res = await fetch("/api/ide/files");
-      const data = await res.json();
-      setTree(data.tree || []);
-    };
     fetchTree();
   }, []);
 
@@ -66,6 +72,80 @@ export const IdeClient = () => {
       setActiveContent(data.content ?? "");
     } catch (e) {
       setActiveContent(`// Unable to read file: ${path}\n// ${String(e)}`);
+    }
+  };
+
+  async function handleCreateFile(pathRel: string) {
+    const res = await fetch("/api/ide/fs/create", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path: pathRel }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data?.error || "Failed to create file");
+    await fetchTree();
+    setChat((c) => [...c, { role: "assistant", content: `Created file: ${pathRel}`, ts: Date.now() }]);
+  }
+
+  async function handleEditFile(pathRel: string, find: string, replace: string) {
+    const res = await fetch("/api/ide/fs/edit", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path: pathRel, find, replace }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data?.error || "Failed to edit file");
+    setChat((c) => [...c, { role: "assistant", content: `Edited file: ${pathRel} (replaced first occurrence of "${find}")`, ts: Date.now() }]);
+    if (activePath === pathRel) await openFile(pathRel);
+  }
+
+  async function handleExplainFile(pathRel: string) {
+    const res = await fetch(`/api/ide/fs/explain?path=${encodeURIComponent(pathRel)}`);
+    const data = await res.json();
+    if (!res.ok) throw new Error(data?.error || "Failed to explain file");
+    const msg = `Explanation for ${data.path}\n- Language: ${data.language}\n- Lines: ${data.lineCount}\n- Exports: ${(data.exports || []).join(", ") || "(none)"}\n- Summary: ${data.summary}`;
+    setChat((c) => [...c, { role: "assistant", content: msg, ts: Date.now() }]);
+  }
+
+  function parseAndDispatchCommand(text: string) {
+    const raw = text.trim();
+    // Create: "Create a new file named components/Header.tsx"
+    const mCreate = /^(create\s+(a\s+)?new\s+file\s+named\s+|create\s+file\s+)(.+)$/i.exec(raw);
+    if (mCreate) {
+      const pathRel = mCreate[3].trim();
+      return handleCreateFile(pathRel);
+    }
+    // Edit: "In App.tsx, change <find> to 'Hello World'"
+    const mEdit = /^in\s+([^,]+),\s*change\s+(.+?)\s+to\s+['"]([^'"]+)['"]/i.exec(raw);
+    if (mEdit) {
+      const pathRel = mEdit[1].trim();
+      const find = mEdit[2].trim();
+      const replace = mEdit[3];
+      return handleEditFile(pathRel, find, replace);
+    }
+    // Explain: "Explain this code in server.js" or "Explain code in src/app/page.tsx"
+    const mExplain = /^explain\s+(this\s+)?code\s+in\s+(.+)$/i.exec(raw);
+    if (mExplain) {
+      const pathRel = mExplain[2].trim();
+      return handleExplainFile(pathRel);
+    }
+    // Fallback: just echo
+    setChat((c) => [...c, { role: "assistant", content: "I didn't understand. Try: \n- Create a new file named components/Header.tsx\n- In App.tsx, change <text> to 'Hello World'\n- Explain this code in server.js", ts: Date.now() }]);
+  }
+
+  const handleAssistantSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const text = assistantInput.trim();
+    if (!text) return;
+    setChat((c) => [...c, { role: "user", content: text, ts: Date.now() }]);
+    setAssistantInput("");
+    setIsSending(true);
+    try {
+      await parseAndDispatchCommand(text);
+    } catch (err: any) {
+      setChat((c) => [...c, { role: "assistant", content: `Error: ${err?.message || String(err)}` , ts: Date.now() }]);
+    } finally {
+      setIsSending(false);
     }
   };
 
@@ -132,6 +212,27 @@ export const IdeClient = () => {
     setIsExecuting(false);
   };
 
+  const handleRunPreview = async () => {
+    try {
+      const res = await fetch("/api/ide/preview", { method: "POST" });
+      const data = await res.json();
+      if (res.ok && data?.url) {
+        setPreviewUrl(data.url);
+        setPreviewOpen(true);
+      } else {
+        setChat((c) => [
+          ...c,
+          { role: "assistant", content: `Preview error: ${data?.error || "failed to start preview"}`, ts: Date.now() },
+        ]);
+      }
+    } catch (e: any) {
+      setChat((c) => [
+        ...c,
+        { role: "assistant", content: `Preview error: ${e?.message || String(e)}`, ts: Date.now() },
+      ]);
+    }
+  };
+
   const FileTree: React.FC<{ nodes: FileNode[]; depth?: number }> = ({ nodes, depth = 0 }) => {
     return (
       <div className="space-y-1">
@@ -191,7 +292,7 @@ export const IdeClient = () => {
             />
           </div>
           <div className="flex items-center gap-2">
-            <Button variant="secondary" size="sm">
+            <Button variant="secondary" size="sm" onClick={handleRunPreview}>
               <Play className="h-4 w-4 mr-1" />
               Run / Preview
             </Button>
@@ -265,18 +366,33 @@ export const IdeClient = () => {
             <Separator className="mt-2" />
             <div className="flex-1 min-h-0">
               <TabsContent value="assistant" className="m-0 h-full">
-                <ScrollArea className="h-full p-3 space-y-2">
-                  {chat.length === 0 ? (
-                    <Card className="p-3 text-sm text-muted-foreground">Use the Plan tab to generate a plan, then Confirm to see live execution logs here.</Card>
-                  ) : (
-                    chat.map((m, idx) => (
-                      <Card key={idx} className="p-3 text-sm">
-                        <div className="text-xs text-muted-foreground">{new Date(m.ts).toLocaleTimeString()}</div>
-                        <div>{m.content}</div>
-                      </Card>
-                    ))
-                  )}
-                </ScrollArea>
+                <div className="h-full flex flex-col">
+                  <ScrollArea className="flex-1 p-3 space-y-2">
+                    {chat.length === 0 ? (
+                      <Card className="p-3 text-sm text-muted-foreground">Type commands like: "Create a new file named components/Header.tsx" • "In src/app/page.tsx, change Home to 'Hello World'" • "Explain this code in src/app/page.tsx"</Card>
+                    ) : (
+                      chat.map((m, idx) => (
+                        <Card key={idx} className="p-3 text-sm whitespace-pre-wrap">
+                          <div className="text-xs text-muted-foreground">{new Date(m.ts).toLocaleTimeString()} · {m.role}</div>
+                          <div className="mt-1">{m.content}</div>
+                        </Card>
+                      ))
+                    )}
+                  </ScrollArea>
+                  <form onSubmit={handleAssistantSubmit} className="border-t p-2 flex items-center gap-2">
+                    <Input
+                      value={assistantInput}
+                      onChange={(e) => setAssistantInput(e.target.value)}
+                      placeholder="Ask AI to create/edit/explain…"
+                      disabled={isSending}
+                      className="h-9"
+                    />
+                    <Button type="submit" size="sm" disabled={isSending}>
+                      <Send className="h-4 w-4 mr-1" />
+                      Send
+                    </Button>
+                  </form>
+                </div>
               </TabsContent>
               <TabsContent value="plan" className="m-0 h-full">
                 <div className="h-full flex flex-col p-3 gap-3">
@@ -318,6 +434,24 @@ export const IdeClient = () => {
           </Tabs>
         </ResizablePanel>
       </ResizablePanelGroup>
+
+      {/* Preview Dialog */}
+      <Dialog open={previewOpen} onOpenChange={setPreviewOpen}>
+        <DialogContent className="max-w-[95vw] w-[1100px] h-[80vh] p-0 overflow-hidden">
+          <DialogHeader className="px-4 pt-4 pb-2 flex items-center justify-between">
+            <DialogTitle>Live Preview</DialogTitle>
+            <Button size="sm" variant="outline" onClick={() => setPreviewOpen(false)}>
+              Close
+            </Button>
+          </DialogHeader>
+          <div className="px-4 pb-4">
+            <div className="w-full h-[60vh] border rounded overflow-hidden bg-muted">
+              <iframe src={previewUrl} className="w-full h-full" />
+            </div>
+            <div className="mt-3 text-xs text-muted-foreground">Serving URL: {previewUrl}</div>
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 };
