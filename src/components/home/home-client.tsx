@@ -1,11 +1,16 @@
 "use client"
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Card } from "@/components/ui/card";
-import { Loader2, Sparkles, Download, Code2 } from "lucide-react";
+import { Loader2, Sparkles, Download, Code2, Settings, FolderKanban } from "lucide-react";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog";
 // import { authClient, useSession } from "@/lib/auth-client";
 // import Link from "next/link";
 // import { toast } from "sonner";
@@ -17,10 +22,76 @@ export const HomeClient = () => {
   const [isComplete, setIsComplete] = useState(false);
   const [downloadUrl, setDownloadUrl] = useState<string | null>(null);
   const [currentProjectId, setCurrentProjectId] = useState<number | null>(null);
-  // const { data: session, isPending, refetch } = useSession();
   const router = useRouter();
 
-  // Temporarily allow generation without login
+  // Phase One: AI Settings modal state
+  const [aiModalOpen, setAiModalOpen] = useState(false);
+  const [apiKey, setApiKey] = useState("");
+  const [model, setModel] = useState<string>("gemini-2.5-pro");
+  const [verifyStatus, setVerifyStatus] = useState<"idle"|"verifying"|"success"|"error">("idle");
+  const [verifyMessage, setVerifyMessage] = useState<string>("");
+
+  // Transition confirmation
+  const [confirmOpen, setConfirmOpen] = useState(false);
+
+  useEffect(() => {
+    // Prefill from storage
+    try {
+      const storedKey = localStorage.getItem("ai.apiKey");
+      const storedModel = localStorage.getItem("ai.model");
+      if (storedKey) setApiKey(storedKey);
+      if (storedModel) setModel(storedModel);
+    } catch {}
+  }, []);
+
+  const handleSaveAndActivate = async () => {
+    setVerifyStatus("verifying");
+    setVerifyMessage("Verifying key…");
+    try {
+      const res = await fetch("/api/ai/verify", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ apiKey, model }),
+      });
+      const data = await res.json();
+      if (data?.ok) {
+        setVerifyStatus("success");
+        setVerifyMessage("Key active and ready to use.");
+        // Persist
+        try {
+          localStorage.setItem("ai.apiKey", apiKey);
+          localStorage.setItem("ai.model", model);
+        } catch {}
+        // Auto-close after 2s
+        setTimeout(() => {
+          setAiModalOpen(false);
+          setVerifyStatus("idle");
+          setVerifyMessage("");
+        }, 2000);
+      } else {
+        setVerifyStatus("error");
+        setVerifyMessage(`Activation failed: ${data?.error || "Unknown error"}`);
+      }
+    } catch (e: any) {
+      setVerifyStatus("error");
+      setVerifyMessage(`Activation failed: ${e?.message || "Unknown error"}`);
+    }
+  };
+
+  // Phase One flow: instead of immediately generating, ask to proceed then go to workspace
+  const handleBuildClick = () => {
+    if (!projectDescription.trim()) return;
+    setConfirmOpen(true);
+  };
+
+  const proceedToWorkspace = () => {
+    setConfirmOpen(false);
+    // Pass idea to IDE; the IDE can use it to create a plan
+    const idea = encodeURIComponent(projectDescription.trim());
+    router.push(`/ide?idea=${idea}`);
+  };
+
+  // ... keep existing generation handlers in case they're needed elsewhere
   const handleGenerateProject = async () => {
     if (!projectDescription.trim()) return;
 
@@ -33,7 +104,6 @@ export const HomeClient = () => {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          // Authorization header removed temporarily
         },
         body: JSON.stringify({
           title: projectDescription.substring(0, 100),
@@ -60,7 +130,6 @@ export const HomeClient = () => {
           method: "PUT",
           headers: {
             "Content-Type": "application/json",
-            // Authorization header removed temporarily
           },
           body: JSON.stringify({ status: "failed" }),
         });
@@ -76,32 +145,16 @@ export const HomeClient = () => {
         method: "PUT",
         headers: {
           "Content-Type": "application/json",
-          // Authorization header removed temporarily
         },
         body: JSON.stringify({
           status: "completed",
           fileUrl: url,
         }),
       });
-
-      // toast.success("Project generated successfully!");
     } catch (error) {
       console.error("Error generating project:", error);
-      // toast.error("Failed to generate project. Please try again.");
     } finally {
       setIsGenerating(false);
-    }
-  };
-
-  const handleDownload = () => {
-    if (downloadUrl) {
-      const a = document.createElement("a");
-      a.href = downloadUrl;
-      a.download = "generated-project.zip";
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      // toast.success("Project downloaded!");
     }
   };
 
@@ -119,9 +172,14 @@ export const HomeClient = () => {
             </div>
           </div>
 
-          {/* Temporarily hide auth UI */}
-          <div className="flex items-center gap-3">
-            <Button variant="outline" size="sm" onClick={() => router.push("/ide")}>Open IDE</Button>
+          {/* Phase One toolbar */}
+          <div className="flex items-center gap-2">
+            <Button variant="outline" size="sm" onClick={() => setAiModalOpen(true)}>
+              <Settings className="h-4 w-4 mr-2" /> AI Settings
+            </Button>
+            <Button variant="outline" size="sm" disabled>
+              <FolderKanban className="h-4 w-4 mr-2" /> My Projects
+            </Button>
           </div>
         </div>
       </header>
@@ -159,19 +217,12 @@ export const HomeClient = () => {
             </div>
 
             <Button
-              onClick={handleGenerateProject}
-              disabled={!projectDescription.trim() || isGenerating}
+              onClick={handleBuildClick}
+              disabled={!projectDescription.trim()}
               className="w-full h-12 text-base font-semibold"
               size="lg"
             >
-              {isGenerating ? (
-                <>
-                  <Loader2 className="mr-2 h-5 w-5 animate-spin" />
-                  Generating...
-                </>
-              ) : (
-                <>Build Project 🚀</>
-              )}
+              Build My Project
             </Button>
 
             {isGenerating && (
@@ -196,7 +247,16 @@ export const HomeClient = () => {
                     <p className="font-semibold text-lg mb-1">Project Generated Successfully!</p>
                     <p className="text-sm text-muted-foreground">Your project is ready to download</p>
                   </div>
-                  <Button onClick={handleDownload} className="w-full md:w-auto" size="lg">
+                  <Button onClick={() => {
+                    if (downloadUrl) {
+                      const a = document.createElement("a");
+                      a.href = downloadUrl;
+                      a.download = "generated-project.zip";
+                      document.body.appendChild(a);
+                      a.click();
+                      document.body.removeChild(a);
+                    }
+                  }} className="w-full md:w-auto" size="lg">
                     <Download className="mr-2 h-5 w-5" />
                     Download Project (.zip)
                   </Button>
@@ -230,6 +290,69 @@ export const HomeClient = () => {
           </Card>
         </div>
       </main>
+
+      {/* AI Settings Modal */}
+      <Dialog open={aiModalOpen} onOpenChange={setAiModalOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>AI Settings</DialogTitle>
+            <DialogDescription>Provide your API key and select a model.</DialogDescription>
+          </DialogHeader>
+          <div className="grid gap-4 py-2">
+            <div className="grid gap-2">
+              <Label htmlFor="apiKey">API Key</Label>
+              <Input id="apiKey" type="password" value={apiKey} onChange={(e) => setApiKey(e.target.value)} placeholder="Enter your Gemini API key" autoComplete="off" />
+            </div>
+            <div className="grid gap-2">
+              <Label>Select AI Model</Label>
+              <Select value={model} onValueChange={setModel}>
+                <SelectTrigger>
+                  <SelectValue placeholder="Select a model" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="gemini-2.5-pro">Gemini 2.5 Pro</SelectItem>
+                  <SelectItem value="gemini-2.5-flash">Gemini 2.5 Flash</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+          </div>
+          <DialogFooter className="flex items-center justify-between">
+            <div className="flex items-center gap-2 text-sm">
+              <span
+                className={
+                  "inline-block h-2.5 w-2.5 rounded-full " +
+                  (verifyStatus === "idle" ? "bg-muted-foreground/40" : verifyStatus === "verifying" ? "bg-yellow-500" : verifyStatus === "success" ? "bg-green-500" : "bg-red-500")
+                }
+              />
+              <span className="text-muted-foreground">
+                {verifyStatus === "idle" && "Waiting"}
+                {verifyStatus === "verifying" && "Verifying key…"}
+                {verifyStatus === "success" && verifyMessage}
+                {verifyStatus === "error" && verifyMessage}
+              </span>
+            </div>
+            <Button onClick={handleSaveAndActivate} disabled={!apiKey || verifyStatus === "verifying"}>
+              Save & Activate
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Confirmation Alert Dialog */}
+      <AlertDialog open={confirmOpen} onOpenChange={setConfirmOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Proceed to Workspace?</AlertDialogTitle>
+            <AlertDialogDescription>
+              I'll now create a plan for your project. Would you like to proceed?
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction onClick={proceedToWorkspace}>Yes, proceed</AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 };
