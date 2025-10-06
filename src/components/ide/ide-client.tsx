@@ -12,6 +12,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Input } from "@/components/ui/input";
 import { Download, Play, Share2, Folder, File, ChevronRight, ChevronDown, Bot, Settings, ClipboardList, Send } from "lucide-react";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { toast } from "sonner";
 
 // Monaco must be dynamically imported on client
 const MonacoEditor = dynamic(() => import("@monaco-editor/react"), { ssr: false });
@@ -77,6 +78,18 @@ export const IdeClient = () => {
     fetchTree();
   }, []);
 
+  // Helper: expand parent folders in the tree
+  const expandParentFolders = (filePath: string) => {
+    const parts = filePath.split("/");
+    const newExpanded = { ...expanded };
+    let currentPath = "";
+    for (let i = 0; i < parts.length - 1; i++) {
+      currentPath = currentPath ? `${currentPath}/${parts[i]}` : parts[i];
+      newExpanded[currentPath] = true;
+    }
+    setExpanded(newExpanded);
+  };
+
   const openFile = async (path: string) => {
     setActivePath(path);
     try {
@@ -98,7 +111,11 @@ export const IdeClient = () => {
     const data = await res.json();
     if (!res.ok) throw new Error(data?.error || "Failed to create file");
     await fetchTree();
-    setChat((c) => [...c, { role: "assistant", content: `Created file: ${pathRel}`, ts: Date.now() }]);
+    setChat((c) => [...c, { role: "assistant", content: `✓ Created file: ${pathRel}`, ts: Date.now() }]);
+    
+    // Auto-open the newly created file
+    expandParentFolders(pathRel);
+    await openFile(pathRel);
   }
 
   async function handleEditFile(pathRel: string, find: string, replace: string) {
@@ -109,7 +126,9 @@ export const IdeClient = () => {
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data?.error || "Failed to edit file");
-    setChat((c) => [...c, { role: "assistant", content: `Edited file: ${pathRel} (replaced first occurrence of "${find}")`, ts: Date.now() }]);
+    setChat((c) => [...c, { role: "assistant", content: `✓ Edited file: ${pathRel} (replaced first occurrence of "${find}")`, ts: Date.now() }]);
+    
+    // If the file is currently open, refresh its content
     if (activePath === pathRel) await openFile(pathRel);
   }
 
@@ -126,7 +145,7 @@ export const IdeClient = () => {
       setActivePath("");
       setActiveContent("// File deleted. Select another file.\n");
     }
-    setChat((c) => [...c, { role: "assistant", content: `Deleted file: ${pathRel}` , ts: Date.now() }]);
+    setChat((c) => [...c, { role: "assistant", content: `✓ Deleted file: ${pathRel}` , ts: Date.now() }]);
   }
 
   async function handleExplainFile(pathRel: string) {
@@ -135,7 +154,7 @@ export const IdeClient = () => {
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data?.error || "Failed to explain file");
-    const msg = `Explanation for ${data.path}\n- Language: ${data.language}\n- Lines: ${data.lineCount}\n- Exports: ${(data.exports || []).join(", ") || "(none)"}\n- Summary: ${data.summary}`;
+    const msg = `📊 Explanation for ${data.path}\n\n• Language: ${data.language}\n• Lines: ${data.lineCount}\n• Exports: ${(data.exports || []).join(", ") || "(none)"}\n\n${data.summary}`;
     setChat((c) => [...c, { role: "assistant", content: msg, ts: Date.now() }]);
   }
 
@@ -148,49 +167,47 @@ export const IdeClient = () => {
   function parseAndDispatchCommand(text: string) {
     const raw = text.trim();
 
-    // CREATE variants:
-    // 1) "Create a new file named components/Header.tsx"
-    // 2) "Create a new file in the src folder named styles.css and write some basic CSS styles in it."
+    // CREATE variants
     let m = /^(?:create\s+(?:a\s+)?new\s+file|create\s+file)(?:\s+in\s+(.+?)\s+folder)?\s+named\s+([^\s]+)(?:\s+and\s+write\s+(.+))?$/i.exec(raw);
     if (m) {
       const folder = m[1];
       const name = m[2];
       const content = m[3]?.trim();
       const pathRel = normalizePath(folder, name);
-      setChat((c) => [...c, { role: "assistant", content: `Okay, I will now create the file ${pathRel}…`, ts: Date.now() }]);
+      setChat((c) => [...c, { role: "assistant", content: `Creating file ${pathRel}…`, ts: Date.now() }]);
       return handleCreateFile(pathRel, content);
     }
 
-    // DELETE variant: "Delete the README.md file" or "Delete file src/app/page.tsx"
+    // DELETE variant
     m = /^delete\s+(?:the\s+)?(?:file\s+)?(.+)$/i.exec(raw);
     if (m) {
       const pathRel = m[1].trim();
-      setChat((c) => [...c, { role: "assistant", content: `Okay, I will now delete the file ${pathRel}…`, ts: Date.now() }]);
+      setChat((c) => [...c, { role: "assistant", content: `Deleting file ${pathRel}…`, ts: Date.now() }]);
       return handleDeleteFile(pathRel);
     }
 
-    // EDIT: "In App.tsx, change <find> to 'Hello World'" or "Open App.tsx and change ..."
+    // EDIT variant
     m = /^(?:in|open)\s+([^,]+?),?\s*(?:and\s+)?change\s+(.+?)\s+to\s+['"]([^'"]+)['"]/i.exec(raw);
     if (m) {
       const pathRel = m[1].trim();
       const find = m[2].trim();
       const replace = m[3];
-      setChat((c) => [...c, { role: "assistant", content: `Okay, I will now edit ${pathRel} (change ${find} → "${replace}")…`, ts: Date.now() }]);
+      setChat((c) => [...c, { role: "assistant", content: `Editing ${pathRel}…`, ts: Date.now() }]);
       return handleEditFile(pathRel, find, replace);
     }
 
-    // EXPLAIN / ANALYZE: "Analyze the code in server.js and explain what it does" or "Explain this code in src/app/page.tsx"
+    // EXPLAIN / ANALYZE variant
     m = /^(?:analy(se|ze)\s+the\s+code\s+in|explain\s+(?:this\s+)?code\s+in)\s+(.+?)(?:\s+and\s+explain\s+what\s+it\s+does)?$/i.exec(raw);
     if (m) {
       const pathRel = (m[2] || m[0]).trim();
-      setChat((c) => [...c, { role: "assistant", content: `Okay, I will now analyze ${pathRel} and explain it…`, ts: Date.now() }]);
+      setChat((c) => [...c, { role: "assistant", content: `Analyzing ${pathRel}…`, ts: Date.now() }]);
       return handleExplainFile(pathRel);
     }
 
     // Fallback: guidance
     setChat((c) => [
       ...c,
-      { role: "assistant", content: "I didn't understand. Try:\n- Create a new file in the src folder named styles.css and write some basic CSS styles in it.\n- Delete the README.md file\n- In src/app/page.tsx, change Home to 'Hello World'\n- Analyze the code in src/app/page.tsx and explain what it does.", ts: Date.now() },
+      { role: "assistant", content: "❓ I didn't understand. Try:\n\n• Create a new file in the components folder named Header.tsx\n• Delete the README.md file\n• In src/app/page.tsx, change Home to 'Hello World'\n• Explain this code in src/app/page.tsx", ts: Date.now() },
     ]);
   }
 
@@ -204,7 +221,7 @@ export const IdeClient = () => {
     try {
       await parseAndDispatchCommand(text);
     } catch (err: any) {
-      setChat((c) => [...c, { role: "assistant", content: `Error: ${err?.message || String(err)}` , ts: Date.now() }]);
+      setChat((c) => [...c, { role: "assistant", content: `❌ Error: ${err?.message || String(err)}` , ts: Date.now() }]);
     } finally {
       setIsSending(false);
     }
@@ -228,6 +245,9 @@ export const IdeClient = () => {
       });
       const data = await res.json();
       setPlan(data.plan || []);
+      toast.success("Plan generated successfully");
+    } catch (err: any) {
+      toast.error(`Failed to generate plan: ${err?.message || String(err)}`);
     } finally {
       setIsPlanning(false);
     }
@@ -237,6 +257,7 @@ export const IdeClient = () => {
     if (!plan.length) return;
     setIsExecuting(true);
     setRightTab("assistant");
+    toast.info("Executing plan...");
 
     // Simulate execution logs and live updates
     const steps = plan;
@@ -244,39 +265,62 @@ export const IdeClient = () => {
       const step = steps[i];
       setChat((c) => [
         ...c,
-        { role: "assistant", content: `Planned: ${step}` , ts: Date.now() },
+        { role: "assistant", content: `📋 Planned: ${step}` , ts: Date.now() },
       ]);
-      // Simulate a created/edited message
       await new Promise((r) => setTimeout(r, 400));
-      const createdMsg = step.replace(/^Create /i, "Created ").replace(/^Add /i, "Added ");
+      const createdMsg = step.replace(/^Create /i, "✓ Created ").replace(/^Add /i, "✓ Added ");
       setChat((c) => [
         ...c,
         { role: "assistant", content: createdMsg, ts: Date.now() },
       ]);
     }
-    // Refresh tree from server to reflect any real changes made by steps
+    
     await fetchTree();
     setIsExecuting(false);
+    toast.success("Plan execution completed");
   };
 
   const handleRunPreview = async () => {
+    toast.info("Starting preview server...");
     try {
       const res = await fetch("/api/ide/preview", { method: "POST" });
       const data = await res.json();
       if (res.ok && data?.url) {
         setPreviewUrl(data.url);
         setPreviewOpen(true);
+        toast.success("Preview server started");
       } else {
-        setChat((c) => [
-          ...c,
-          { role: "assistant", content: `Preview error: ${data?.error || "failed to start preview"}`, ts: Date.now() },
-        ]);
+        toast.error(`Preview failed: ${data?.error || "unknown error"}`);
       }
     } catch (e: any) {
-      setChat((c) => [
-        ...c,
-        { role: "assistant", content: `Preview error: ${e?.message || String(e)}`, ts: Date.now() },
-      ]);
+      toast.error(`Preview error: ${e?.message || String(e)}`);
+    }
+  };
+
+  const handleDownload = async () => {
+    toast.info("Preparing download...");
+    try {
+      const encodedName = encodeURIComponent(projectName);
+      const res = await fetch(`/api/ide/download?name=${encodedName}`);
+      
+      if (!res.ok) {
+        const data = await res.json();
+        throw new Error(data?.error || "Download failed");
+      }
+
+      const blob = await res.blob();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${projectName}.zip`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      window.URL.revokeObjectURL(url);
+      
+      toast.success("Project downloaded successfully");
+    } catch (e: any) {
+      toast.error(`Download error: ${e?.message || String(e)}`);
     }
   };
 
@@ -343,7 +387,7 @@ export const IdeClient = () => {
               <Play className="h-4 w-4 mr-1" />
               Run / Preview
             </Button>
-            <Button variant="outline" size="sm">
+            <Button variant="outline" size="sm" onClick={handleDownload}>
               <Download className="h-4 w-4 mr-1" />
               Download
             </Button>
@@ -414,17 +458,30 @@ export const IdeClient = () => {
             <div className="flex-1 min-h-0">
               <TabsContent value="assistant" className="m-0 h-full">
                 <div className="h-full flex flex-col">
-                  <ScrollArea className="flex-1 p-3 space-y-2">
-                    {chat.length === 0 ? (
-                      <Card className="p-3 text-sm text-muted-foreground">Type commands like: "Create a new file named components/Header.tsx" • "In src/app/page.tsx, change Home to 'Hello World'" • "Explain this code in src/app/page.tsx"</Card>
-                    ) : (
-                      chat.map((m, idx) => (
-                        <Card key={idx} className="p-3 text-sm whitespace-pre-wrap">
-                          <div className="text-xs text-muted-foreground">{new Date(m.ts).toLocaleTimeString()} · {m.role}</div>
-                          <div className="mt-1">{m.content}</div>
+                  <ScrollArea className="flex-1 p-3">
+                    <div className="space-y-2">
+                      {chat.length === 0 ? (
+                        <Card className="p-3 text-sm text-muted-foreground">
+                          <div className="font-medium mb-2">💡 Try these commands:</div>
+                          <div className="space-y-1 text-xs">
+                            <div>• "Create a new file named components/Header.tsx"</div>
+                            <div>• "In src/app/page.tsx, change Home to 'Hello World'"</div>
+                            <div>• "Explain this code in src/app/page.tsx"</div>
+                            <div>• "Delete the README.md file"</div>
+                          </div>
                         </Card>
-                      ))
-                    )}
+                      ) : (
+                        chat.map((m, idx) => (
+                          <Card key={idx} className="p-3 text-sm">
+                            <div className="text-xs text-muted-foreground mb-1 flex items-center justify-between">
+                              <span className="font-medium capitalize">{m.role}</span>
+                              <span>{new Date(m.ts).toLocaleTimeString()}</span>
+                            </div>
+                            <div className="whitespace-pre-wrap">{m.content}</div>
+                          </Card>
+                        ))
+                      )}
+                    </div>
                   </ScrollArea>
                   <form onSubmit={handleAssistantSubmit} className="border-t p-2 flex items-center gap-2">
                     <Input
@@ -435,8 +492,7 @@ export const IdeClient = () => {
                       className="h-9"
                     />
                     <Button type="submit" size="sm" disabled={isSending}>
-                      <Send className="h-4 w-4 mr-1" />
-                      Send
+                      <Send className="h-4 w-4" />
                     </Button>
                   </form>
                 </div>
@@ -455,7 +511,7 @@ export const IdeClient = () => {
                       {isPlanning ? "Planning..." : "Build Plan"}
                     </Button>
                     <Button variant="secondary" onClick={handleConfirmExecute} disabled={!plan.length || isExecuting} size="sm">
-                      {isExecuting ? "Executing..." : "Confirm & Start Execution"}
+                      {isExecuting ? "Executing..." : "Confirm & Start"}
                     </Button>
                   </div>
                   <ScrollArea className="flex-1">
@@ -485,17 +541,21 @@ export const IdeClient = () => {
       {/* Preview Dialog */}
       <Dialog open={previewOpen} onOpenChange={setPreviewOpen}>
         <DialogContent className="max-w-[95vw] w-[1100px] h-[80vh] p-0 overflow-hidden">
-          <DialogHeader className="px-4 pt-4 pb-2 flex items-center justify-between">
-            <DialogTitle>Live Preview</DialogTitle>
-            <Button size="sm" variant="outline" onClick={() => setPreviewOpen(false)}>
-              Close
-            </Button>
-          </DialogHeader>
-          <div className="px-4 pb-4">
-            <div className="w-full h-[60vh] border rounded overflow-hidden bg-muted">
-              <iframe src={previewUrl} className="w-full h-full" />
+          <DialogHeader className="px-4 pt-4 pb-2 border-b">
+            <div className="flex items-center justify-between">
+              <DialogTitle>Live Preview</DialogTitle>
+              <Button size="sm" variant="outline" onClick={() => setPreviewOpen(false)}>
+                Close Preview
+              </Button>
             </div>
-            <div className="mt-3 text-xs text-muted-foreground">Serving URL: {previewUrl}</div>
+          </DialogHeader>
+          <div className="h-full flex flex-col">
+            <div className="flex-1 overflow-hidden">
+              <iframe src={previewUrl} className="w-full h-full border-0" title="Preview" />
+            </div>
+            <div className="px-4 py-2 border-t bg-muted/30">
+              <div className="text-xs text-muted-foreground">Serving: {previewUrl}</div>
+            </div>
           </div>
         </DialogContent>
       </Dialog>
