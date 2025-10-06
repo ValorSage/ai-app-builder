@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, useCallback } from "react";
 import dynamic from "next/dynamic";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -8,13 +8,31 @@ import { Separator } from "@/components/ui/separator";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "@/components/ui/resizable";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { Textarea } from "@/components/ui/textarea";
 import { Input } from "@/components/ui/input";
-import { Download, Play, Share2, Folder, File, ChevronRight, ChevronDown, Bot, Settings, ClipboardList, Send } from "lucide-react";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { 
+  Download, 
+  Play, 
+  Share2, 
+  Folder, 
+  File, 
+  ChevronRight, 
+  ChevronDown, 
+  Send, 
+  AlertTriangle,
+  FileText,
+  Eye,
+  Settings,
+  Monitor,
+  Smartphone,
+  Tablet,
+  Tv
+} from "lucide-react";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
+import { Badge } from "@/components/ui/badge";
 import { toast } from "sonner";
 
-// Monaco must be dynamically imported on client
 const MonacoEditor = dynamic(() => import("@monaco-editor/react"), { ssr: false });
 
 type FileNode = {
@@ -23,6 +41,40 @@ type FileNode = {
   type: "file" | "folder";
   children?: FileNode[];
 };
+
+type Issue = {
+  id: string;
+  type: "linter" | "compiler" | "ai";
+  severity: "error" | "warning" | "info";
+  file: string;
+  line: number;
+  column?: number;
+  message: string;
+  suggestion?: string;
+};
+
+type Message = {
+  role: "system" | "assistant" | "user";
+  content: string;
+  ts: number;
+};
+
+type ViewMode = "files" | "preview";
+
+type DeviceSize = {
+  name: string;
+  width: number;
+  height: number;
+  icon: any;
+};
+
+const DEVICE_SIZES: DeviceSize[] = [
+  { name: "Desktop", width: 1920, height: 1080, icon: Monitor },
+  { name: "Laptop", width: 1366, height: 768, icon: Monitor },
+  { name: "Tablet", width: 768, height: 1024, icon: Tablet },
+  { name: "Mobile", width: 375, height: 667, icon: Smartphone },
+  { name: "TV", width: 1920, height: 1080, icon: Tv },
+];
 
 function detectLanguage(path: string): string {
   if (path.endsWith(".ts")) return "typescript";
@@ -39,46 +91,54 @@ export const IdeClient = () => {
   const [tree, setTree] = useState<FileNode[]>([]);
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [activePath, setActivePath] = useState<string>("");
-  const [activeContent, setActiveContent] = useState<string>("// Select a file from the left to view its content\n");
+  const [activeContent, setActiveContent] = useState<string>("// Select a file to view its content\n");
   const [projectName, setProjectName] = useState<string>("My Project");
-
-  // Right panel state
-  const [rightTab, setRightTab] = useState<string>("assistant");
-  const [idea, setIdea] = useState<string>("");
-  const [plan, setPlan] = useState<string[]>([]);
-  const [chat, setChat] = useState<{ role: "system" | "assistant" | "user"; content: string; ts: number }[]>([]);
-  const [isPlanning, setIsPlanning] = useState(false);
-  const [isExecuting, setIsExecuting] = useState(false);
+  const [viewMode, setViewMode] = useState<ViewMode>("files");
+  
+  // AI and messaging
+  const [chat, setChat] = useState<Message[]>([]);
   const [assistantInput, setAssistantInput] = useState("");
   const [isSending, setIsSending] = useState(false);
-  const [previewOpen, setPreviewOpen] = useState(false);
+  
+  // Preview
   const [previewUrl, setPreviewUrl] = useState("http://localhost:3001");
+  const [selectedDevice, setSelectedDevice] = useState<DeviceSize>(DEVICE_SIZES[0]);
+  const [previewKey, setPreviewKey] = useState(0);
+  
+  // Issues
+  const [issues, setIssues] = useState<Issue[]>([]);
+  const [issuesCount, setIssuesCount] = useState(0);
 
-  const fetchTree = async () => {
-    const res = await fetch("/api/ide/files");
-    const data = await res.json();
-    setTree(data.tree || []);
-  };
-
-  // Helper: include AI key/model with AI requests
-  const getAIHeaders = () => {
+  const fetchTree = useCallback(async () => {
     try {
-      const apiKey = localStorage.getItem("ai.apiKey") || "";
-      const model = localStorage.getItem("ai.model") || "";
-      const headers: Record<string, string> = {};
-      if (apiKey) headers["x-ai-key"] = apiKey;
-      if (model) headers["x-ai-model"] = model;
-      return headers;
-    } catch {
-      return {} as Record<string, string>;
+      const res = await fetch("/api/ide/files");
+      const data = await res.json();
+      setTree(data.tree || []);
+    } catch (e) {
+      console.error("Failed to fetch tree:", e);
     }
-  };
+  }, []);
+
+  const fetchIssues = useCallback(async () => {
+    try {
+      const res = await fetch("/api/issues");
+      const data = await res.json();
+      setIssues(data.issues || []);
+      setIssuesCount(data.count || 0);
+    } catch (e) {
+      console.error("Failed to fetch issues:", e);
+    }
+  }, []);
 
   useEffect(() => {
     fetchTree();
-  }, []);
+    fetchIssues();
+    
+    // Poll for issues every 30 seconds
+    const interval = setInterval(fetchIssues, 30000);
+    return () => clearInterval(interval);
+  }, [fetchTree, fetchIssues]);
 
-  // Helper: expand parent folders in the tree
   const expandParentFolders = (filePath: string) => {
     const parts = filePath.split("/");
     const newExpanded = { ...expanded };
@@ -102,198 +162,135 @@ export const IdeClient = () => {
     }
   };
 
-  async function handleCreateFile(pathRel: string, content?: string) {
-    const res = await fetch("/api/ide/fs/create", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ path: pathRel, ...(typeof content === "string" ? { content } : {}) }),
-    });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data?.error || "Failed to create file");
-    await fetchTree();
-    setChat((c) => [...c, { role: "assistant", content: `✓ Created file: ${pathRel}`, ts: Date.now() }]);
-    
-    // Auto-open the newly created file
-    expandParentFolders(pathRel);
-    await openFile(pathRel);
-  }
-
-  async function handleEditFile(pathRel: string, find: string, replace: string) {
-    const res = await fetch("/api/ide/fs/edit", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ path: pathRel, find, replace }),
-    });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data?.error || "Failed to edit file");
-    setChat((c) => [...c, { role: "assistant", content: `✓ Edited file: ${pathRel} (replaced first occurrence of "${find}")`, ts: Date.now() }]);
-    
-    // If the file is currently open, refresh its content
-    if (activePath === pathRel) await openFile(pathRel);
-  }
-
-  async function handleDeleteFile(pathRel: string) {
-    const res = await fetch("/api/ide/fs/delete", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ path: pathRel }),
-    });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data?.error || "Failed to delete file");
-    await fetchTree();
-    if (activePath === pathRel) {
-      setActivePath("");
-      setActiveContent("// File deleted. Select another file.\n");
+  const handleSaveFile = async () => {
+    if (!activePath) return;
+    try {
+      const res = await fetch("/api/files", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path: activePath, content: activeContent }),
+      });
+      if (res.ok) {
+        toast.success("File saved");
+        // Trigger preview reload
+        setPreviewKey(prev => prev + 1);
+      } else {
+        toast.error("Failed to save file");
+      }
+    } catch (e) {
+      toast.error(`Save error: ${e}`);
     }
-    setChat((c) => [...c, { role: "assistant", content: `✓ Deleted file: ${pathRel}` , ts: Date.now() }]);
-  }
+  };
 
-  async function handleExplainFile(pathRel: string) {
-    const res = await fetch(`/api/ide/fs/explain?path=${encodeURIComponent(pathRel)}`, {
-      headers: { ...getAIHeaders() },
-    });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data?.error || "Failed to explain file");
-    const msg = `📊 Explanation for ${data.path}\n\n• Language: ${data.language}\n• Lines: ${data.lineCount}\n• Exports: ${(data.exports || []).join(", ") || "(none)"}\n\n${data.summary}`;
-    setChat((c) => [...c, { role: "assistant", content: msg, ts: Date.now() }]);
-  }
-
-  function normalizePath(folder: string | undefined, nameOrPath: string): string {
-    if (!folder) return nameOrPath.trim();
-    const cleanFolder = folder.replace(/^the\s+/i, "").replace(/\s+folder$/i, "").trim().replace(/\/+$/g, "");
-    return `${cleanFolder}/${nameOrPath.trim()}`.replace(/\\/g, "/");
-  }
-
-  function parseAndDispatchCommand(text: string) {
-    const raw = text.trim();
-
-    // CREATE variants
-    let m = /^(?:create\s+(?:a\s+)?new\s+file|create\s+file)(?:\s+in\s+(.+?)\s+folder)?\s+named\s+([^\s]+)(?:\s+and\s+write\s+(.+))?$/i.exec(raw);
-    if (m) {
-      const folder = m[1];
-      const name = m[2];
-      const content = m[3]?.trim();
-      const pathRel = normalizePath(folder, name);
-      setChat((c) => [...c, { role: "assistant", content: `Creating file ${pathRel}…`, ts: Date.now() }]);
-      return handleCreateFile(pathRel, content);
-    }
-
-    // DELETE variant
-    m = /^delete\s+(?:the\s+)?(?:file\s+)?(.+)$/i.exec(raw);
-    if (m) {
-      const pathRel = m[1].trim();
-      setChat((c) => [...c, { role: "assistant", content: `Deleting file ${pathRel}…`, ts: Date.now() }]);
-      return handleDeleteFile(pathRel);
-    }
-
-    // EDIT variant
-    m = /^(?:in|open)\s+([^,]+?),?\s*(?:and\s+)?change\s+(.+?)\s+to\s+['"]([^'"]+)['"]/i.exec(raw);
-    if (m) {
-      const pathRel = m[1].trim();
-      const find = m[2].trim();
-      const replace = m[3];
-      setChat((c) => [...c, { role: "assistant", content: `Editing ${pathRel}…`, ts: Date.now() }]);
-      return handleEditFile(pathRel, find, replace);
-    }
-
-    // EXPLAIN / ANALYZE variant
-    m = /^(?:analy(se|ze)\s+the\s+code\s+in|explain\s+(?:this\s+)?code\s+in)\s+(.+?)(?:\s+and\s+explain\s+what\s+it\s+does)?$/i.exec(raw);
-    if (m) {
-      const pathRel = (m[2] || m[0]).trim();
-      setChat((c) => [...c, { role: "assistant", content: `Analyzing ${pathRel}…`, ts: Date.now() }]);
-      return handleExplainFile(pathRel);
-    }
-
-    // Fallback: guidance
-    setChat((c) => [
-      ...c,
-      { role: "assistant", content: "❓ I didn't understand. Try:\n\n• Create a new file in the components folder named Header.tsx\n• Delete the README.md file\n• In src/app/page.tsx, change Home to 'Hello World'\n• Explain this code in src/app/page.tsx", ts: Date.now() },
-    ]);
-  }
-
-  const handleAssistantSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleAgentCommand = async () => {
     const text = assistantInput.trim();
     if (!text) return;
+    
     setChat((c) => [...c, { role: "user", content: text, ts: Date.now() }]);
     setAssistantInput("");
     setIsSending(true);
+
     try {
-      await parseAndDispatchCommand(text);
-    } catch (err: any) {
-      setChat((c) => [...c, { role: "assistant", content: `❌ Error: ${err?.message || String(err)}` , ts: Date.now() }]);
+      const apiKey = localStorage.getItem("ai.apiKey") || "";
+      const model = localStorage.getItem("ai.model") || "gpt-4";
+
+      const res = await fetch("/api/agent/execute", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ command: text, apiKey, model }),
+      });
+
+      const data = await res.json();
+
+      if (!res.ok) {
+        setChat((c) => [...c, { role: "assistant", content: `❌ ${data.error || "Unknown error"}`, ts: Date.now() }]);
+        return;
+      }
+
+      // Display message
+      setChat((c) => [...c, { role: "assistant", content: data.message || "✓ Done", ts: Date.now() }]);
+
+      // Handle specific actions
+      if (data.action === "CREATE_FILE" || data.action === "EDIT_FILE") {
+        await fetchTree();
+        if (data.created) {
+          expandParentFolders(data.created);
+          await openFile(data.created);
+        }
+        if (data.edited && activePath === data.edited) {
+          await openFile(data.edited);
+        }
+        setPreviewKey(prev => prev + 1);
+      }
+
+      if (data.action === "DELETE_FILE") {
+        await fetchTree();
+        if (activePath === data.deleted) {
+          setActivePath("");
+          setActiveContent("// File deleted. Select another file.\n");
+        }
+        setPreviewKey(prev => prev + 1);
+      }
+
+      if (data.action === "ANALYZE_CODE") {
+        if (data.issues && data.issues.length > 0) {
+          // Store AI issues
+          await fetch("/api/issues", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              issues: data.issues.map((issue: any, idx: number) => ({
+                id: `ai-${data.analyzed}-${issue.line}-${idx}`,
+                type: "ai",
+                severity: issue.type === "bug" ? "error" : issue.type === "warning" ? "warning" : "info",
+                file: data.analyzed,
+                line: issue.line,
+                message: issue.message,
+                suggestion: issue.suggestion
+              }))
+            }),
+          });
+          await fetchIssues();
+
+          const issuesList = data.issues.map((i: any) => 
+            `• Line ${i.line}: ${i.message} (${i.suggestion})`
+          ).join("\n");
+          setChat((c) => [...c, { role: "assistant", content: `📊 Found ${data.issues.length} issue(s):\n\n${issuesList}`, ts: Date.now() }]);
+        } else {
+          setChat((c) => [...c, { role: "assistant", content: "✓ No issues found", ts: Date.now() }]);
+        }
+      }
+
+      if (data.action === "INSTALL_PACKAGE" || data.action === "UNINSTALL_PACKAGE") {
+        if (data.needsExecution) {
+          // Execute package install/uninstall
+          const pkgRes = await fetch("/api/packages/install", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ 
+              package: data.package, 
+              action: data.action === "INSTALL_PACKAGE" ? "install" : "uninstall" 
+            }),
+          });
+          
+          if (pkgRes.ok) {
+            setChat((c) => [...c, { role: "assistant", content: `✓ Package ${data.package} ${data.action === "INSTALL_PACKAGE" ? "installed" : "uninstalled"}`, ts: Date.now() }]);
+          } else {
+            const pkgData = await pkgRes.json();
+            setChat((c) => [...c, { role: "assistant", content: `❌ Package operation failed: ${pkgData.error}`, ts: Date.now() }]);
+          }
+        }
+      }
+
+      if (data.action === "LIST_FILES" && data.files) {
+        const filesList = data.files.slice(0, 50).join("\n• ");
+        setChat((c) => [...c, { role: "assistant", content: `📁 Files (showing ${Math.min(50, data.files.length)}/${data.files.length}):\n\n• ${filesList}`, ts: Date.now() }]);
+      }
+
+    } catch (e: any) {
+      setChat((c) => [...c, { role: "assistant", content: `❌ ${e?.message || String(e)}`, ts: Date.now() }]);
     } finally {
       setIsSending(false);
-    }
-  };
-
-  const toggle = (path: string) => {
-    setExpanded((prev) => ({ ...prev, [path]: !prev[path] }));
-  };
-
-  const language = useMemo(() => detectLanguage(activePath), [activePath]);
-
-  const handleMakePlan = async () => {
-    if (!idea.trim()) return;
-    setIsPlanning(true);
-    setRightTab("plan");
-    try {
-      const res = await fetch("/api/ide/plan", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", ...getAIHeaders() },
-        body: JSON.stringify({ idea }),
-      });
-      const data = await res.json();
-      setPlan(data.plan || []);
-      toast.success("Plan generated successfully");
-    } catch (err: any) {
-      toast.error(`Failed to generate plan: ${err?.message || String(err)}`);
-    } finally {
-      setIsPlanning(false);
-    }
-  };
-
-  const handleConfirmExecute = async () => {
-    if (!plan.length) return;
-    setIsExecuting(true);
-    setRightTab("assistant");
-    toast.info("Executing plan...");
-
-    // Simulate execution logs and live updates
-    const steps = plan;
-    for (let i = 0; i < steps.length; i++) {
-      const step = steps[i];
-      setChat((c) => [
-        ...c,
-        { role: "assistant", content: `📋 Planned: ${step}` , ts: Date.now() },
-      ]);
-      await new Promise((r) => setTimeout(r, 400));
-      const createdMsg = step.replace(/^Create /i, "✓ Created ").replace(/^Add /i, "✓ Added ");
-      setChat((c) => [
-        ...c,
-        { role: "assistant", content: createdMsg, ts: Date.now() },
-      ]);
-    }
-    
-    await fetchTree();
-    setIsExecuting(false);
-    toast.success("Plan execution completed");
-  };
-
-  const handleRunPreview = async () => {
-    toast.info("Starting preview server...");
-    try {
-      const res = await fetch("/api/ide/preview", { method: "POST" });
-      const data = await res.json();
-      if (res.ok && data?.url) {
-        setPreviewUrl(data.url);
-        setPreviewOpen(true);
-        toast.success("Preview server started");
-      } else {
-        toast.error(`Preview failed: ${data?.error || "unknown error"}`);
-      }
-    } catch (e: any) {
-      toast.error(`Preview error: ${e?.message || String(e)}`);
     }
   };
 
@@ -318,11 +315,22 @@ export const IdeClient = () => {
       document.body.removeChild(a);
       window.URL.revokeObjectURL(url);
       
-      toast.success("Project downloaded successfully");
+      toast.success("Project downloaded");
     } catch (e: any) {
       toast.error(`Download error: ${e?.message || String(e)}`);
     }
   };
+
+  const handleIssueClick = (issue: Issue) => {
+    openFile(issue.file);
+    toast.info(`Navigating to ${issue.file}:${issue.line}`);
+  };
+
+  const toggle = (path: string) => {
+    setExpanded((prev) => ({ ...prev, [path]: !prev[path] }));
+  };
+
+  const language = useMemo(() => detectLanguage(activePath), [activePath]);
 
   const FileTree: React.FC<{ nodes: FileNode[]; depth?: number }> = ({ nodes, depth = 0 }) => {
     return (
@@ -374,18 +382,60 @@ export const IdeClient = () => {
     <div className="h-[calc(100dvh)] w-full flex flex-col">
       {/* Top Toolbar */}
       <div className="border-b bg-background/80 backdrop-blur supports-[backdrop-filter]:bg-background/60 sticky top-0 z-10">
-        <div className="flex items-center justify-between px-3 md:px-4 py-2">
-          <div className="flex items-center gap-2 min-w-0">
+        <div className="flex items-center justify-between px-4 py-2">
+          <div className="flex items-center gap-3 min-w-0">
             <Input
               value={projectName}
               onChange={(e) => setProjectName(e.target.value)}
               className="h-9 w-[200px] md:w-[280px]"
             />
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button variant="ghost" size="sm" className="gap-2">
+                  <AlertTriangle className="h-4 w-4" />
+                  {issuesCount > 0 && (
+                    <Badge variant="destructive" className="h-5 px-1.5 text-xs">
+                      {issuesCount}
+                    </Badge>
+                  )}
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="start" className="w-[400px] max-h-[400px] overflow-auto">
+                {issues.length === 0 ? (
+                  <div className="p-4 text-sm text-muted-foreground text-center">
+                    No issues found
+                  </div>
+                ) : (
+                  issues.map((issue) => (
+                    <DropdownMenuItem
+                      key={issue.id}
+                      onClick={() => handleIssueClick(issue)}
+                      className="flex flex-col items-start gap-1 p-3 cursor-pointer"
+                    >
+                      <div className="flex items-center gap-2 w-full">
+                        <Badge
+                          variant={issue.severity === "error" ? "destructive" : "secondary"}
+                          className="text-xs"
+                        >
+                          {issue.type}
+                        </Badge>
+                        <span className="text-xs text-muted-foreground truncate flex-1">
+                          {issue.file}:{issue.line}
+                        </span>
+                      </div>
+                      <div className="text-sm">{issue.message}</div>
+                      {issue.suggestion && (
+                        <div className="text-xs text-muted-foreground">💡 {issue.suggestion}</div>
+                      )}
+                    </DropdownMenuItem>
+                  ))
+                )}
+              </DropdownMenuContent>
+            </DropdownMenu>
           </div>
           <div className="flex items-center gap-2">
-            <Button variant="secondary" size="sm" onClick={handleRunPreview}>
-              <Play className="h-4 w-4 mr-1" />
-              Run / Preview
+            <Button variant="secondary" size="sm" onClick={handleSaveFile} disabled={!activePath}>
+              Save
             </Button>
             <Button variant="outline" size="sm" onClick={handleDownload}>
               <Download className="h-4 w-4 mr-1" />
@@ -399,22 +449,89 @@ export const IdeClient = () => {
         </div>
       </div>
 
+      {/* Sub-header Toolbar */}
+      <div className="border-b bg-muted/30 px-4 py-2 flex items-center gap-2">
+        <Button
+          variant={viewMode === "files" ? "secondary" : "ghost"}
+          size="sm"
+          onClick={() => setViewMode("files")}
+        >
+          <FileText className="h-4 w-4 mr-1" />
+          Files
+        </Button>
+        <Button
+          variant={viewMode === "preview" ? "secondary" : "ghost"}
+          size="sm"
+          onClick={() => setViewMode("preview")}
+        >
+          <Eye className="h-4 w-4 mr-1" />
+          Preview
+        </Button>
+      </div>
+
       {/* Three Panel Layout */}
       <ResizablePanelGroup direction="horizontal" className="flex-1 min-h-0">
-        {/* Left: File Explorer */}
-        <ResizablePanel defaultSize={22} minSize={16} maxSize={40} className="min-w-[180px]">
+        {/* Left: File Explorer or Preview */}
+        <ResizablePanel defaultSize={viewMode === "preview" ? 60 : 22} minSize={16} maxSize={80}>
           <div className="h-full flex flex-col">
-            <div className="px-3 py-2 font-medium text-sm text-muted-foreground">File Explorer</div>
-            <Separator />
-            <ScrollArea className="flex-1 p-2">
-              <FileTree nodes={tree} />
-            </ScrollArea>
+            {viewMode === "files" ? (
+              <>
+                <div className="px-3 py-2 font-medium text-sm text-muted-foreground">File Explorer</div>
+                <Separator />
+                <ScrollArea className="flex-1 p-2">
+                  <FileTree nodes={tree} />
+                </ScrollArea>
+              </>
+            ) : (
+              <>
+                <div className="px-3 py-2 border-b flex items-center justify-between">
+                  <span className="font-medium text-sm text-muted-foreground">Live Preview</span>
+                  <Select
+                    value={selectedDevice.name}
+                    onValueChange={(name) => {
+                      const device = DEVICE_SIZES.find(d => d.name === name);
+                      if (device) setSelectedDevice(device);
+                    }}
+                  >
+                    <SelectTrigger className="w-[140px] h-8">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {DEVICE_SIZES.map((device) => (
+                        <SelectItem key={device.name} value={device.name}>
+                          <div className="flex items-center gap-2">
+                            <device.icon className="h-4 w-4" />
+                            {device.name}
+                          </div>
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="flex-1 overflow-auto bg-muted/20 p-4 flex items-center justify-center">
+                  <div
+                    className="bg-background border-2 border-border shadow-xl rounded-lg overflow-hidden"
+                    style={{
+                      width: `${Math.min(selectedDevice.width, window.innerWidth * 0.9)}px`,
+                      height: `${Math.min(selectedDevice.height, window.innerHeight * 0.7)}px`,
+                    }}
+                  >
+                    <iframe
+                      key={previewKey}
+                      src={previewUrl}
+                      className="w-full h-full border-0"
+                      title="Live Preview"
+                    />
+                  </div>
+                </div>
+              </>
+            )}
           </div>
         </ResizablePanel>
         <ResizableHandle withHandle />
 
         {/* Center: Monaco Editor */}
-        <ResizablePanel defaultSize={56} minSize={35}>
+        <ResizablePanel defaultSize={viewMode === "preview" ? 18 : 56} minSize={20}>
           <div className="h-full flex flex-col">
             <div className="px-3 py-2 border-b text-sm flex items-center gap-2">
               <span className="truncate">{activePath || "No file selected"}</span>
@@ -438,127 +555,59 @@ export const IdeClient = () => {
         </ResizablePanel>
         <ResizableHandle withHandle />
 
-        {/* Right: Tabs */}
-        <ResizablePanel defaultSize={22} minSize={18} maxSize={40} className="min-w-[220px] border-l">
-          <Tabs value={rightTab} onValueChange={setRightTab} className="h-full flex flex-col">
-            <div className="px-3 pt-2">
-              <TabsList className="grid grid-cols-3 w-full">
-                <TabsTrigger value="assistant" className="text-xs">
-                  <Bot className="h-3.5 w-3.5 mr-1" /> AI
-                </TabsTrigger>
-                <TabsTrigger value="plan" className="text-xs">
-                  <ClipboardList className="h-3.5 w-3.5 mr-1" /> Plan
-                </TabsTrigger>
-                <TabsTrigger value="settings" className="text-xs">
-                  <Settings className="h-3.5 w-3.5 mr-1" /> Settings
-                </TabsTrigger>
-              </TabsList>
+        {/* Right: AI Assistant */}
+        <ResizablePanel defaultSize={22} minSize={18} maxSize={40} className="border-l">
+          <div className="h-full flex flex-col">
+            <div className="px-3 py-2 border-b font-medium text-sm text-muted-foreground flex items-center gap-2">
+              <Settings className="h-4 w-4" />
+              AI Assistant
             </div>
-            <Separator className="mt-2" />
-            <div className="flex-1 min-h-0">
-              <TabsContent value="assistant" className="m-0 h-full">
-                <div className="h-full flex flex-col">
-                  <ScrollArea className="flex-1 p-3">
-                    <div className="space-y-2">
-                      {chat.length === 0 ? (
-                        <Card className="p-3 text-sm text-muted-foreground">
-                          <div className="font-medium mb-2">💡 Try these commands:</div>
-                          <div className="space-y-1 text-xs">
-                            <div>• "Create a new file named components/Header.tsx"</div>
-                            <div>• "In src/app/page.tsx, change Home to 'Hello World'"</div>
-                            <div>• "Explain this code in src/app/page.tsx"</div>
-                            <div>• "Delete the README.md file"</div>
-                          </div>
-                        </Card>
-                      ) : (
-                        chat.map((m, idx) => (
-                          <Card key={idx} className="p-3 text-sm">
-                            <div className="text-xs text-muted-foreground mb-1 flex items-center justify-between">
-                              <span className="font-medium capitalize">{m.role}</span>
-                              <span>{new Date(m.ts).toLocaleTimeString()}</span>
-                            </div>
-                            <div className="whitespace-pre-wrap">{m.content}</div>
-                          </Card>
-                        ))
-                      )}
+            <ScrollArea className="flex-1 p-3">
+              <div className="space-y-2">
+                {chat.length === 0 ? (
+                  <Card className="p-3 text-sm text-muted-foreground">
+                    <div className="font-medium mb-2">💡 Available Commands:</div>
+                    <div className="space-y-1 text-xs">
+                      <div>• "Create a Button component"</div>
+                      <div>• "Analyze src/app/page.tsx"</div>
+                      <div>• "Install axios"</div>
+                      <div>• "List all files"</div>
                     </div>
-                  </ScrollArea>
-                  <form onSubmit={handleAssistantSubmit} className="border-t p-2 flex items-center gap-2">
-                    <Input
-                      value={assistantInput}
-                      onChange={(e) => setAssistantInput(e.target.value)}
-                      placeholder="Ask AI to create/edit/explain…"
-                      disabled={isSending}
-                      className="h-9"
-                    />
-                    <Button type="submit" size="sm" disabled={isSending}>
-                      <Send className="h-4 w-4" />
-                    </Button>
-                  </form>
-                </div>
-              </TabsContent>
-              <TabsContent value="plan" className="m-0 h-full">
-                <div className="h-full flex flex-col p-3 gap-3">
-                  <Textarea
-                    value={idea}
-                    onChange={(e) => setIdea(e.target.value)}
-                    placeholder="Describe your project idea..."
-                    className="min-h-[90px]"
-                    disabled={isPlanning || isExecuting}
-                  />
-                  <div className="flex items-center gap-2">
-                    <Button onClick={handleMakePlan} disabled={!idea.trim() || isPlanning} size="sm">
-                      {isPlanning ? "Planning..." : "Build Plan"}
-                    </Button>
-                    <Button variant="secondary" onClick={handleConfirmExecute} disabled={!plan.length || isExecuting} size="sm">
-                      {isExecuting ? "Executing..." : "Confirm & Start"}
-                    </Button>
-                  </div>
-                  <ScrollArea className="flex-1">
-                    {plan.length ? (
-                      <ol className="list-decimal pl-5 space-y-1 text-sm">
-                        {plan.map((p, i) => (
-                          <li key={i}>{p}</li>
-                        ))}
-                      </ol>
-                    ) : (
-                      <div className="text-sm text-muted-foreground">Your plan will appear here.</div>
-                    )}
-                  </ScrollArea>
-                </div>
-              </TabsContent>
-              <TabsContent value="settings" className="m-0 h-full">
-                <div className="p-3 text-sm space-y-3">
-                  <div className="font-medium">Settings</div>
-                  <div className="text-muted-foreground">Manage API keys and preferences here (coming soon).</div>
-                </div>
-              </TabsContent>
-            </div>
-          </Tabs>
+                  </Card>
+                ) : (
+                  chat.map((m, idx) => (
+                    <Card key={idx} className="p-3 text-sm">
+                      <div className="text-xs text-muted-foreground mb-1 flex items-center justify-between">
+                        <span className="font-medium capitalize">{m.role}</span>
+                        <span>{new Date(m.ts).toLocaleTimeString()}</span>
+                      </div>
+                      <div className="whitespace-pre-wrap">{m.content}</div>
+                    </Card>
+                  ))
+                )}
+              </div>
+            </ScrollArea>
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                handleAgentCommand();
+              }}
+              className="border-t p-2 flex items-center gap-2"
+            >
+              <Input
+                value={assistantInput}
+                onChange={(e) => setAssistantInput(e.target.value)}
+                placeholder="Ask AI to create, analyze, or install..."
+                disabled={isSending}
+                className="h-9"
+              />
+              <Button type="submit" size="sm" disabled={isSending}>
+                <Send className="h-4 w-4" />
+              </Button>
+            </form>
+          </div>
         </ResizablePanel>
       </ResizablePanelGroup>
-
-      {/* Preview Dialog */}
-      <Dialog open={previewOpen} onOpenChange={setPreviewOpen}>
-        <DialogContent className="max-w-[95vw] w-[1100px] h-[80vh] p-0 overflow-hidden">
-          <DialogHeader className="px-4 pt-4 pb-2 border-b">
-            <div className="flex items-center justify-between">
-              <DialogTitle>Live Preview</DialogTitle>
-              <Button size="sm" variant="outline" onClick={() => setPreviewOpen(false)}>
-                Close Preview
-              </Button>
-            </div>
-          </DialogHeader>
-          <div className="h-full flex flex-col">
-            <div className="flex-1 overflow-hidden">
-              <iframe src={previewUrl} className="w-full h-full border-0" title="Preview" />
-            </div>
-            <div className="px-4 py-2 border-t bg-muted/30">
-              <div className="text-xs text-muted-foreground">Serving: {previewUrl}</div>
-            </div>
-          </div>
-        </DialogContent>
-      </Dialog>
     </div>
   );
 };
